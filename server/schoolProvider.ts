@@ -195,7 +195,25 @@ export function normalizeSchoolQuery(raw: string): NormalizedQueryInfo {
 }
 
 /**
+ * Helper to normalize and clean HTML text
+ */
+function cleanHtmlText(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#039;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Parses official school detail HTML from referensi.data.kemendikdasmen.go.id/tabs.php?npsn=...
+ * Tolerant to table variations, whitespace, &nbsp;, case variations, and label synonyms.
  */
 export async function fetchOfficialKemendikdasmenDetail(npsn: string): Promise<Partial<SchoolCandidateResult> | null> {
   if (!npsn || !/^\d{8}$/.test(npsn)) return null;
@@ -205,55 +223,122 @@ export async function fetchOfficialKemendikdasmenDetail(npsn: string): Promise<P
     const res = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
-        Accept: 'text/html,application/xhtml+xml',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(4500),
     });
 
     if (!res.ok) return null;
     const html = await res.text();
 
     const fieldMap: Record<string, string> = {};
+
+    // 1. Match table rows with 2 or 3 cells
+    const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+    let trMatch;
+    while ((trMatch = trRegex.exec(html)) !== null) {
+      const rowContent = trMatch[1];
+      const tdMatches = Array.from(rowContent.matchAll(/<(?:td|th)[^>]*>([\s\S]*?)<\/(?:td|th)>/gi));
+      if (tdMatches.length >= 2) {
+        const rawCells = tdMatches.map((m) => cleanHtmlText(m[1]));
+        if (rawCells.length >= 3 && (rawCells[1] === ':' || rawCells[1] === '')) {
+          const key = rawCells[0].replace(/:$/, '').trim();
+          const val = rawCells[2].trim();
+          if (key && val) fieldMap[key] = val;
+        } else if (rawCells.length >= 2) {
+          const key = rawCells[0].replace(/:$/, '').trim();
+          const val = rawCells[1].replace(/^:\s*/, '').trim();
+          if (key && val && val !== ':') fieldMap[key] = val;
+        }
+      }
+    }
+
+    // 2. Match standard rowRegex format
     const rowRegex = /<td>([^<]+)<\/td>\s*<td>:<\/td>\s*<td>([^<]*)<\/td>/gi;
     let m;
     while ((m = rowRegex.exec(html)) !== null) {
-      const key = m[1].replace(/&nbsp;/g, ' ').trim();
-      const val = m[2].replace(/&nbsp;/g, ' ').trim();
-      if (key) fieldMap[key] = val;
+      const key = cleanHtmlText(m[1]);
+      const val = cleanHtmlText(m[2]);
+      if (key && val) fieldMap[key] = val;
     }
 
-    const name = fieldMap['Nama'] || '';
-    if (!name) return null;
+    // Helper to find field value across multiple label synonyms (case-insensitive)
+    const getField = (...keys: string[]): string => {
+      for (const k of keys) {
+        if (fieldMap[k] && fieldMap[k] !== '-' && fieldMap[k] !== '') {
+          return fieldMap[k];
+        }
+        const normK = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+        for (const [mk, mv] of Object.entries(fieldMap)) {
+          if (mk.toLowerCase().replace(/[^a-z0-9]/g, '') === normK && mv && mv !== '-') {
+            return mv;
+          }
+        }
+      }
+      return '';
+    };
 
-    const rawStatus = fieldMap['Status Sekolah'] || '';
+    // Text regex fallback for Headmaster & NIP
+    let principalName = getField('Kepala Sekolah', 'Nama Kepala Sekolah', 'Nama KS', 'Pimpinan', 'Nama Pimpinan', 'Kepala Satuan Pendidikan');
+    let principalNip = getField('NIP Kepala Sekolah', 'NIP KS', 'NIP Pimpinan', 'NIP');
+
+    if (!principalName) {
+      const pMatch = html.match(/(?:Kepala\s+Sekolah|Nama\s+Kepala\s+Sekolah|Nama\s+KS|Pimpinan|Nama\s+Pimpinan)\s*(?:<\/td>\s*<td>)?\s*[:=]\s*(?:<\/td>\s*<td>)?\s*([^<\n\r]+)/i);
+      if (pMatch && pMatch[1]) {
+        const candidatePName = cleanHtmlText(pMatch[1]);
+        if (candidatePName && candidatePName.length > 2 && candidatePName !== '-' && !/^(belum|tidak|null|n\/a)/i.test(candidatePName)) {
+          principalName = candidatePName;
+        }
+      }
+    }
+
+    if (!principalNip) {
+      const nipMatch = html.match(/(?:NIP\s*(?:Kepala\s+Sekolah|KS|Pimpinan)?)\s*(?:<\/td>\s*<td>)?\s*[:=]\s*(?:<\/td>\s*<td>)?\s*([\d\s]{10,25})/i);
+      if (nipMatch && nipMatch[1]) {
+        const candidateNip = cleanHtmlText(nipMatch[1]);
+        if (/^\d[\d\s]{9,24}$/.test(candidateNip) && candidateNip.replace(/\s/g, '').length >= 10) {
+          principalNip = candidateNip;
+        }
+      }
+    }
+
+    // Sanitize invalid boilerplate
+    if (principalName && (/^(belum|tidak|null|n\/a|-|\.)/i.test(principalName) || principalName.trim().length < 3)) {
+      principalName = '';
+    }
+    if (principalNip && (/^(belum|tidak|null|n\/a|-|0+)/i.test(principalNip) || principalNip.replace(/\s/g, '').length < 8)) {
+      principalNip = '';
+    }
+
+    const name = getField('Nama', 'Nama Sekolah', 'Nama Satuan Pendidikan');
+    if (!name && !principalName) return null;
+
+    const rawStatus = getField('Status Sekolah', 'Status');
     const status = rawStatus.toUpperCase().includes('NEGERI')
       ? 'Negeri'
-      : rawStatus ? 'Swasta' : (name.toLowerCase().includes('negeri') ? 'Negeri' : 'Swasta');
+      : rawStatus ? 'Swasta' : (name && name.toLowerCase().includes('negeri') ? 'Negeri' : 'Swasta');
 
-    const rawLevel = fieldMap['Bentuk Pendidikan'] || '';
-    const level = (rawLevel || (name.startsWith('SD') ? 'SD' : name.startsWith('SMP') ? 'SMP' : name.startsWith('SMA') ? 'SMA' : name.startsWith('SMK') ? 'SMK' : 'SD')).toUpperCase();
+    const rawLevel = getField('Bentuk Pendidikan', 'Jenjang');
+    const level = (rawLevel || (name && name.startsWith('SD') ? 'SD' : name && name.startsWith('SMP') ? 'SMP' : name && name.startsWith('SMA') ? 'SMA' : name && name.startsWith('SMK') ? 'SMK' : 'SD')).toUpperCase();
 
-    const rawDistrict = fieldMap['Kecamatan/Kota (LN)'] || '';
+    const rawDistrict = getField('Kecamatan/Kota (LN)', 'Kecamatan', 'Kec.');
     const district = rawDistrict ? (rawDistrict.toLowerCase().startsWith('kec.') ? rawDistrict : `Kec. ${rawDistrict}`) : '';
 
-    const phone = fieldMap['Telepon'] && fieldMap['Telepon'] !== '-' ? fieldMap['Telepon'] : '';
-    const email = fieldMap['Email'] && fieldMap['Email'] !== '-' ? fieldMap['Email'] : '';
-
-    const principalName = fieldMap['Kepala Sekolah'] || fieldMap['Nama Kepala Sekolah'] || fieldMap['Nama KS'] || fieldMap['Pimpinan'] || fieldMap['Nama Pimpinan'] || '';
-    const principalNip = fieldMap['NIP Kepala Sekolah'] || fieldMap['NIP KS'] || fieldMap['NIP'] || '';
+    const phone = getField('Telepon', 'No. Telepon', 'Telp');
+    const email = getField('Email', 'E-mail', 'Surel');
 
     return {
-      name,
+      name: name || undefined,
       npsn,
-      address: fieldMap['Alamat'] || '',
-      village: fieldMap['Desa/Kelurahan'] || '',
+      address: getField('Alamat', 'Alamat Jalan', 'Alamat Sekolah'),
+      village: getField('Desa/Kelurahan', 'Kelurahan', 'Desa'),
       district,
-      regency: fieldMap['Kab.-Kota/Negara (LN)'] || '',
-      province: fieldMap['Propinsi/Luar Negeri (LN)'] || '',
+      regency: getField('Kab.-Kota/Negara (LN)', 'Kabupaten/Kota', 'Kabupaten', 'Kota'),
+      province: getField('Propinsi/Luar Negeri (LN)', 'Provinsi', 'Propinsi'),
       status,
       level,
-      phone,
-      email,
+      phone: phone !== '-' ? phone : '',
+      email: email !== '-' ? email : '',
       principalName: principalName || undefined,
       principalNip: principalNip || undefined,
       principalSource: principalName ? 'Data Referensi Kemendikdasmen' : undefined,
@@ -516,9 +601,42 @@ const VERIFIED_PRESEEDED_SCHOOLS: SchoolCandidateResult[] = [
 ];
 
 const inMemorySchoolCache = new Map<string, SchoolCandidateResult>();
-// Seed cache
+
+/**
+ * Cache helper to get school by NPSN or normalized name
+ */
+export function getCachedSchool(query: string): SchoolCandidateResult | undefined {
+  if (!query) return undefined;
+  const trimmed = query.trim();
+  if (/^\d{8}$/.test(trimmed)) {
+    return inMemorySchoolCache.get(trimmed);
+  }
+  const norm = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (norm.length > 3) {
+    return inMemorySchoolCache.get(`name:${norm}`);
+  }
+  return undefined;
+}
+
+/**
+ * Cache helper to save school with both NPSN and normalized name index
+ */
+export function setCachedSchool(school: SchoolCandidateResult): void {
+  if (!school) return;
+  if (school.npsn && /^\d{8}$/.test(school.npsn)) {
+    inMemorySchoolCache.set(school.npsn, school);
+  }
+  if (school.name) {
+    const norm = school.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (norm.length > 3) {
+      inMemorySchoolCache.set(`name:${norm}`, school);
+    }
+  }
+}
+
+// Seed preseeded catalog into cache
 for (const s of VERIFIED_PRESEEDED_SCHOOLS) {
-  inMemorySchoolCache.set(s.npsn, s);
+  setCachedSchool(s);
 }
 
 /**
@@ -816,6 +934,7 @@ export class TrustedWebSearchProvider implements SchoolDataProvider {
   private officialProvider = new OfficialKemendikdasmenDirectoryProvider();
   private thirdPartyProvider = new ThirdPartySchoolApiProvider();
   private geminiProvider = new GeminiSearchGroundingProvider();
+  private principalResolver = new GeminiPrincipalResolver();
 
   async search(query: string): Promise<SchoolCandidateResult[]> {
     const trimmed = query.trim();
@@ -823,9 +942,10 @@ export class TrustedWebSearchProvider implements SchoolDataProvider {
 
     const info = normalizeSchoolQuery(trimmed);
 
-    // 1. Check in-memory cache for fast hit
-    if (info.isNpsn && inMemorySchoolCache.has(info.npsnCandidate)) {
-      return [inMemorySchoolCache.get(info.npsnCandidate)!];
+    // 1. Check in-memory cache for direct fast hit
+    const directCached = getCachedSchool(info.npsnCandidate || info.clean);
+    if (directCached && directCached.principalName) {
+      return [directCached];
     }
 
     // 2. Query Official Directory and Third-Party API concurrently with timeouts
@@ -853,7 +973,7 @@ export class TrustedWebSearchProvider implements SchoolDataProvider {
             pre.regency.toLowerCase().includes(info.detectedLocation) &&
             pre.name.toLowerCase().includes(info.coreOnly || info.clean))
         ) {
-          candidates.push(pre);
+          candidates.push({ ...pre });
         }
       }
     }
@@ -876,52 +996,89 @@ export class TrustedWebSearchProvider implements SchoolDataProvider {
     const deduplicated = deduplicateCandidates(candidates);
     const ranked = rankSchoolCandidates(info, deduplicated);
 
-    // 6. Enrich top candidate if address/principal is missing and NPSN is present
-    const topCandidate = ranked[0];
-    if (topCandidate) {
-      // Check in-memory cache first
-      if (topCandidate.npsn && inMemorySchoolCache.has(topCandidate.npsn)) {
-        const cached = inMemorySchoolCache.get(topCandidate.npsn)!;
-        if (!topCandidate.principalName && cached.principalName) {
-          topCandidate.principalName = cached.principalName;
-          topCandidate.principalNip = cached.principalNip;
-          topCandidate.principalSource = cached.principalSource;
-          topCandidate.principalSourceUrl = cached.principalSourceUrl;
-          topCandidate.verificationStatus = cached.verificationStatus;
-          topCandidate.lastVerifiedAt = cached.lastVerifiedAt;
+    // 6. Automatically Enrich top candidates with official detail & principal resolution
+    const topBatch = ranked.slice(0, 5);
+    await Promise.allSettled(
+      topBatch.map(async (cand) => {
+        // Check cache for this specific candidate
+        const cached = getCachedSchool(cand.npsn) || getCachedSchool(cand.name);
+        if (cached && cached.principalName && cached.principalName.trim()) {
+          cand.principalName = cached.principalName;
+          cand.principalNip = cached.principalNip || '';
+          cand.principalSource = cached.principalSource;
+          cand.principalSourceUrl = cached.principalSourceUrl;
+          cand.verificationStatus = cached.verificationStatus || 'verified';
+          cand.lastVerifiedAt = cached.lastVerifiedAt;
+          if (cached.address && !cand.address) cand.address = cached.address;
+          if (cached.village && !cand.village) cand.village = cached.village;
+          if (cached.district && !cand.district) cand.district = cached.district;
+          if (cached.regency && !cand.regency) cand.regency = cached.regency;
+          if (cached.province && !cand.province) cand.province = cached.province;
+          return cand;
         }
-      }
 
-      if (topCandidate.npsn && (!topCandidate.address || !topCandidate.principalName)) {
-        try {
-          const detail = await fetchOfficialKemendikdasmenDetail(topCandidate.npsn);
-          if (detail) {
-            if (!topCandidate.address && detail.address) topCandidate.address = detail.address;
-            if (!topCandidate.village && detail.village) topCandidate.village = detail.village;
-            if (!topCandidate.province && detail.province) topCandidate.province = detail.province;
-            if (!topCandidate.phone && detail.phone) topCandidate.phone = detail.phone;
-            if (!topCandidate.email && detail.email) topCandidate.email = detail.email;
-            if (!topCandidate.principalName && detail.principalName) {
-              topCandidate.principalName = detail.principalName;
-              topCandidate.principalNip = detail.principalNip;
-              topCandidate.principalSource = detail.principalSource;
-              topCandidate.principalSourceUrl = detail.principalSourceUrl;
-              topCandidate.verificationStatus = detail.verificationStatus;
-              topCandidate.lastVerifiedAt = detail.lastVerifiedAt;
+        // Fetch official Kemendikdasmen detail if NPSN is 8 digits
+        if (cand.npsn && /^\d{8}$/.test(cand.npsn)) {
+          try {
+            const detail = await fetchOfficialKemendikdasmenDetail(cand.npsn);
+            if (detail) {
+              if (detail.name) cand.name = detail.name;
+              if (detail.address) cand.address = detail.address;
+              if (detail.village) cand.village = detail.village;
+              if (detail.district) cand.district = detail.district;
+              if (detail.regency) cand.regency = detail.regency;
+              if (detail.province) cand.province = detail.province;
+              if (detail.phone) cand.phone = detail.phone;
+              if (detail.email) cand.email = detail.email;
+              if (detail.level) cand.level = detail.level;
+              if (detail.status) cand.status = detail.status;
+
+              if (detail.principalName && detail.principalName.trim().length > 2) {
+                cand.principalName = detail.principalName.trim();
+                cand.principalNip = detail.principalNip ? detail.principalNip.trim() : '';
+                cand.principalSource = detail.principalSource || 'Data Referensi Kemendikdasmen';
+                cand.principalSourceUrl = detail.principalSourceUrl || `https://referensi.data.kemendikdasmen.go.id/tabs.php?npsn=${cand.npsn}`;
+                cand.verificationStatus = 'verified';
+                cand.lastVerifiedAt = detail.lastVerifiedAt || new Date().toISOString();
+              }
             }
+          } catch {
+            // Enrichment error is non-blocking
           }
-        } catch {
-          // Enrichment error is non-blocking
         }
-      }
-    }
 
-    // Cache top results into memory for future fast lookup
-    for (const c of ranked.slice(0, 5)) {
-      if (c.npsn) {
-        inMemorySchoolCache.set(c.npsn, c);
-      }
-    }
+        // Fallback: If principalName is still empty, resolve via Principal Resolver
+        if (!cand.principalName || !cand.principalName.trim()) {
+          try {
+            const aiRes = await this.principalResolver.resolve({
+              name: cand.name,
+              npsn: cand.npsn,
+              district: cand.district,
+              regency: cand.regency,
+              province: cand.province,
+            });
+            if (aiRes && aiRes.found && aiRes.principalName) {
+              cand.principalName = aiRes.principalName.trim();
+              cand.principalNip = aiRes.principalNip ? aiRes.principalNip.trim() : '';
+              cand.principalSource = aiRes.principalSource || 'Pencarian Referensi Resmi & Dapodik';
+              cand.principalSourceUrl = aiRes.principalSourceUrl;
+              cand.verificationStatus = 'verified';
+              cand.lastVerifiedAt = aiRes.lastVerifiedAt || new Date().toISOString();
+            }
+          } catch {
+            // Non-blocking
+          }
+        }
+
+        if (!cand.principalName) {
+          cand.verificationStatus = 'unverified';
+        }
+
+        // Cache the fully enriched candidate
+        setCachedSchool(cand);
+        return cand;
+      })
+    );
 
     return ranked;
   }
@@ -951,20 +1108,18 @@ export class OfficialEducationDataProvider {
     }
 
     // 1. Check in-memory cache and preseeded catalog
-    if (trimmedNpsn && inMemorySchoolCache.has(trimmedNpsn)) {
-      const cached = inMemorySchoolCache.get(trimmedNpsn)!;
-      if (cached.principalName && cached.principalName.trim()) {
-        return {
-          found: true,
-          principalName: cached.principalName,
-          principalNip: cached.principalNip || '',
-          principalSource: cached.principalSource || 'Data Referensi Kemendikdasmen & Dapodik',
-          principalSourceUrl: cached.principalSourceUrl || (cached.npsn ? `https://referensi.data.kemendikdasmen.go.id/tabs.php?npsn=${cached.npsn}` : undefined),
-          verificationStatus: 'verified',
-          lastVerifiedAt: cached.lastVerifiedAt || new Date().toISOString(),
-          message: 'Data kepala sekolah ditemukan pada katalog terverifikasi.',
-        };
-      }
+    const cached = getCachedSchool(trimmedNpsn) || getCachedSchool(trimmedName);
+    if (cached && cached.principalName && cached.principalName.trim()) {
+      return {
+        found: true,
+        principalName: cached.principalName,
+        principalNip: cached.principalNip || '',
+        principalSource: cached.principalSource || 'Data Referensi Kemendikdasmen & Dapodik',
+        principalSourceUrl: cached.principalSourceUrl || (cached.npsn ? `https://referensi.data.kemendikdasmen.go.id/tabs.php?npsn=${cached.npsn}` : undefined),
+        verificationStatus: 'verified',
+        lastVerifiedAt: cached.lastVerifiedAt || new Date().toISOString(),
+        message: 'Data kepala sekolah ditemukan pada katalog terverifikasi.',
+      };
     }
 
     // 2. Query Kemendikdasmen detail if NPSN is 8 digits
@@ -972,37 +1127,67 @@ export class OfficialEducationDataProvider {
       try {
         const detail = await fetchOfficialKemendikdasmenDetail(trimmedNpsn);
         if (detail && detail.principalName && detail.principalName.trim().length > 2) {
-          return {
+          const result: PrincipalResolutionResult = {
             found: true,
-            principalName: detail.principalName,
-            principalNip: detail.principalNip || '',
+            principalName: detail.principalName.trim(),
+            principalNip: detail.principalNip ? detail.principalNip.trim() : '',
             principalSource: detail.principalSource || 'Data Referensi Kemendikdasmen',
             principalSourceUrl: detail.principalSourceUrl,
             verificationStatus: 'verified',
             lastVerifiedAt: detail.lastVerifiedAt || new Date().toISOString(),
             message: 'Data kepala sekolah berhasil diverifikasi dari Data Referensi Kemendikdasmen.',
           };
+          // Save to cache
+          setCachedSchool({
+            name: detail.name || trimmedName,
+            npsn: trimmedNpsn,
+            address: detail.address || '',
+            village: detail.village || '',
+            district: detail.district || params.district || '',
+            regency: detail.regency || params.regency || '',
+            province: detail.province || params.province || '',
+            level: detail.level || 'SD',
+            status: detail.status || 'Negeri',
+            source: 'Data Referensi Kemendikdasmen',
+            sourceType: 'official_government',
+            principalName: result.principalName,
+            principalNip: result.principalNip,
+            principalSource: result.principalSource,
+            principalSourceUrl: result.principalSourceUrl,
+            verificationStatus: result.verificationStatus,
+            lastVerifiedAt: result.lastVerifiedAt,
+          });
+          return result;
         }
       } catch {
         // Non-blocking
       }
     }
 
-    // 3. Query Gemini AI Principal Resolver
+    // 3. Query Gemini AI Principal Resolver fallback
     if (process.env.GEMINI_API_KEY) {
       try {
         const aiResult = await this.principalResolver.resolve(params);
         if (aiResult && aiResult.found && aiResult.principalName) {
-          // Cache into inMemorySchoolCache if NPSN present
-          if (trimmedNpsn && inMemorySchoolCache.has(trimmedNpsn)) {
-            const cached = inMemorySchoolCache.get(trimmedNpsn)!;
-            cached.principalName = aiResult.principalName;
-            cached.principalNip = aiResult.principalNip;
-            cached.principalSource = aiResult.principalSource;
-            cached.principalSourceUrl = aiResult.principalSourceUrl;
-            cached.verificationStatus = 'verified';
-            cached.lastVerifiedAt = aiResult.lastVerifiedAt;
-          }
+          setCachedSchool({
+            name: trimmedName,
+            npsn: trimmedNpsn,
+            address: '',
+            village: '',
+            district: params.district || '',
+            regency: params.regency || '',
+            province: params.province || '',
+            level: 'SD',
+            status: 'Negeri',
+            source: aiResult.principalSource || 'Pencarian Referensi Resmi & Dapodik',
+            sourceType: 'official_government',
+            principalName: aiResult.principalName,
+            principalNip: aiResult.principalNip,
+            principalSource: aiResult.principalSource,
+            principalSourceUrl: aiResult.principalSourceUrl,
+            verificationStatus: aiResult.verificationStatus,
+            lastVerifiedAt: aiResult.lastVerifiedAt,
+          });
           return aiResult;
         }
       } catch (e) {

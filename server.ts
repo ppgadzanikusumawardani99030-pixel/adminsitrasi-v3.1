@@ -4,6 +4,12 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import { OfficialEducationDataProvider } from './server/schoolProvider';
+import {
+  fallbackAnalyzeCP,
+  fallbackGenerateTP,
+  fallbackGenerateATP,
+  fallbackRefineText,
+} from './server/curriculumFallback';
 
 dotenv.config();
 
@@ -162,14 +168,16 @@ app.post('/api/schools/resolve-principal', async (req, res) => {
 
 // 1. Endpoint: AI Understanding & Breakdown of CP
 app.post('/api/ai/analyze-cp', async (req, res) => {
-  try {
-    const { cpText, elements, subject, grade, phase, curriculum } = req.body;
+  const { cpText, elements, subject, grade, phase, curriculum } = req.body || {};
 
-    if (!cpText && (!elements || elements.length === 0)) {
-      return res.status(400).json({ error: 'Data CP tidak boleh kosong' });
-    }
+  if (!cpText && (!elements || elements.length === 0)) {
+    return res.status(400).json({ error: 'Data CP tidak boleh kosong' });
+  }
 
-    const prompt = `Anda adalah pakar kurikulum dan konsultan pendidikan profesional di Indonesia.
+  // If GEMINI_API_KEY is configured, try Gemini AI first
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const prompt = `Anda adalah pakar kurikulum dan konsultan pendidikan profesional di Indonesia.
 Bantu seorang guru memahami, membedah, dan menganalisis Capaian Pembelajaran (CP) berikut:
 
 - Mata Pelajaran: ${subject || 'Mata Pelajaran'}
@@ -177,10 +185,10 @@ Bantu seorang guru memahami, membedah, dan menganalisis Capaian Pembelajaran (CP
 - Kurikulum: ${curriculum || 'Kurikulum Merdeka'}
 - CP Umum: ${cpText || '-'}
 - Elemen CP: ${
-      elements && elements.length > 0
-        ? elements.map((e: { name: string; content: string }) => `[${e.name}]: ${e.content}`).join('\n')
-        : 'Tidak ada rincian elemen terpisah'
-    }
+        elements && elements.length > 0
+          ? elements.map((e: { name: string; content: string }) => `[${e.name}]: ${e.content}`).join('\n')
+          : 'Tidak ada rincian elemen terpisah'
+      }
 
 Berikan output dalam format JSON dengan struktur:
 1. "summary": Ringkasan fokus utama CP dalam 1-2 paragraf bahasa Indonesia yang jelas, bernas, dan aplikatif bagi guru.
@@ -189,43 +197,50 @@ Berikan output dalam format JSON dengan struktur:
 4. "p3Focus": Array string dimensi Profil Pelajar Pancasila yang paling relevan.
 5. "pedagogicalTips": Array string berisi 2-3 tips strategi pembelajaran kontekstual di kelas.`;
 
-    const response = await generateContentWithRetry({
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            summary: { type: Type.STRING },
-            keyCompetencies: { type: Type.ARRAY, items: { type: Type.STRING } },
-            keyContents: { type: Type.ARRAY, items: { type: Type.STRING } },
-            p3Focus: { type: Type.ARRAY, items: { type: Type.STRING } },
-            pedagogicalTips: { type: Type.ARRAY, items: { type: Type.STRING } },
+      const response = await generateContentWithRetry({
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING },
+              keyCompetencies: { type: Type.ARRAY, items: { type: Type.STRING } },
+              keyContents: { type: Type.ARRAY, items: { type: Type.STRING } },
+              p3Focus: { type: Type.ARRAY, items: { type: Type.STRING } },
+              pedagogicalTips: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ['summary', 'keyCompetencies', 'keyContents', 'p3Focus', 'pedagogicalTips'],
           },
-          required: ['summary', 'keyCompetencies', 'keyContents', 'p3Focus', 'pedagogicalTips'],
         },
-      },
-    });
+      });
 
-    const parsed = cleanAndParseJSON(response.text, {});
-    res.json({ success: true, data: parsed });
-  } catch (error: unknown) {
-    console.error('Error analyzing CP:', error);
-    const message = error instanceof Error ? error.message : 'Terjadi kesalahan saat memproses AI';
-    res.status(500).json({ error: message });
+      const parsed = cleanAndParseJSON(response.text, null);
+      if (parsed && parsed.summary) {
+        return res.json({ success: true, data: parsed, engine: 'gemini' });
+      }
+    } catch (error: unknown) {
+      console.warn('Gemini analysis failed or unconfigured, using pedagogical fallback engine:', error);
+    }
   }
+
+  // Pedagogical Rule Engine fallback
+  const fallback = fallbackAnalyzeCP({ cpText, elements, subject, grade, phase, curriculum });
+  res.json({ success: true, data: fallback, engine: 'pedagogical_engine' });
 });
 
 // 2. Endpoint: AI Generate TP from CP
 app.post('/api/ai/generate-tp', async (req, res) => {
-  try {
-    const { cpGeneral, cpElements, subject, grade, phase, curriculum, count = 4 } = req.body;
+  const { cpGeneral, cpElements, subject, grade, phase, curriculum, count = 4 } = req.body || {};
 
-    if (!cpGeneral && (!cpElements || cpElements.length === 0)) {
-      return res.status(400).json({ error: 'Capaian Pembelajaran (CP) harus diisi terlebih dahulu' });
-    }
+  if (!cpGeneral && (!cpElements || cpElements.length === 0)) {
+    return res.status(400).json({ error: 'Capaian Pembelajaran (CP) harus diisi terlebih dahulu' });
+  }
 
-    const prompt = `Anda adalah ahli perancangan kurikulum pendidikan nasional Indonesia.
+  // If GEMINI_API_KEY is configured, try Gemini AI first
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const prompt = `Anda adalah ahli perancangan kurikulum pendidikan nasional Indonesia.
 Tugas Anda adalah merumuskan Tujuan Pembelajaran (TP) yang diturunkan SECARA KETAT dan EKSPLISIT dari Capaian Pembelajaran (CP) yang diberikan di bawah ini.
 
 PERINGATAN PENTING:
@@ -249,51 +264,58 @@ ${
 Buatlah sekitar ${count} hingga 6 butir Tujuan Pembelajaran (TP) yang sistematis.
 Kembalikan respon dalam format JSON sesuai schema:`;
 
-    const response = await generateContentWithRetry({
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              code: { type: Type.STRING, description: 'Kode TP misal TP 4.1, TP 4.2' },
-              elementName: { type: Type.STRING, description: 'Nama Elemen CP yang menjadi rujukan' },
-              statement: { type: Type.STRING, description: 'Rumusan kalimat Tujuan Pembelajaran lengkap' },
-              competence: { type: Type.STRING, description: 'Kata Kerja Operasional / Kompetensi utama' },
-              contentScope: { type: Type.STRING, description: 'Lingkup Materi / Topik Pembelajaran' },
-              p3Dimensions: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: 'Dimensi Profil Pelajar Pancasila yang diasah (1-3 dimensi)',
+      const response = await generateContentWithRetry({
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                code: { type: Type.STRING, description: 'Kode TP misal TP 4.1, TP 4.2' },
+                elementName: { type: Type.STRING, description: 'Nama Elemen CP yang menjadi rujukan' },
+                statement: { type: Type.STRING, description: 'Rumusan kalimat Tujuan Pembelajaran lengkap' },
+                competence: { type: Type.STRING, description: 'Kata Kerja Operasional / Kompetensi utama' },
+                contentScope: { type: Type.STRING, description: 'Lingkup Materi / Topik Pembelajaran' },
+                p3Dimensions: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: 'Dimensi Profil Pelajar Pancasila yang diasah (1-3 dimensi)',
+                },
               },
+              required: ['code', 'elementName', 'statement', 'competence', 'contentScope', 'p3Dimensions'],
             },
-            required: ['code', 'elementName', 'statement', 'competence', 'contentScope', 'p3Dimensions'],
           },
         },
-      },
-    });
+      });
 
-    const parsed = cleanAndParseJSON(response.text, []);
-    res.json({ success: true, items: parsed });
-  } catch (error: unknown) {
-    console.error('Error generating TP:', error);
-    const message = error instanceof Error ? error.message : 'Terjadi kesalahan saat membuat TP dengan AI';
-    res.status(500).json({ error: message });
+      const parsed = cleanAndParseJSON(response.text, null);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return res.json({ success: true, items: parsed, engine: 'gemini' });
+      }
+    } catch (error: unknown) {
+      console.warn('Gemini TP generation failed or unconfigured, using pedagogical fallback engine:', error);
+    }
   }
+
+  // Pedagogical Rule Engine fallback
+  const fallbackItems = fallbackGenerateTP({ cpGeneral, cpElements, subject, grade, phase, curriculum, count });
+  res.json({ success: true, items: fallbackItems, engine: 'pedagogical_engine' });
 });
 
 // 3. Endpoint: AI Generate ATP from TP
 app.post('/api/ai/generate-atp', async (req, res) => {
-  try {
-    const { tps, cpGeneral, subject, grade, phase, semester, academicYear, totalHoursPerWeek = 5 } = req.body;
+  const { tps, cpGeneral, subject, grade, phase, semester, academicYear, totalHoursPerWeek = 5 } = req.body || {};
 
-    if (!tps || !Array.isArray(tps) || tps.length === 0) {
-      return res.status(400).json({ error: 'Daftar Tujuan Pembelajaran (TP) harus ada sebelum menyusun ATP' });
-    }
+  if (!tps || !Array.isArray(tps) || tps.length === 0) {
+    return res.status(400).json({ error: 'Daftar Tujuan Pembelajaran (TP) harus ada sebelum menyusun ATP' });
+  }
 
-    const prompt = `Anda adalah spesialis penyusun Alur Tujuan Pembelajaran (ATP) dan perangkat pembelajaran Kurikulum Merdeka.
+  // If GEMINI_API_KEY is configured, try Gemini AI first
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const prompt = `Anda adalah spesialis penyusun Alur Tujuan Pembelajaran (ATP) dan perangkat pembelajaran Kurikulum Merdeka.
 Susunlah Matriks Alur Tujuan Pembelajaran (ATP) yang berurutan secara logis, pedagogis, dan terstruktur dari daftar Tujuan Pembelajaran (TP) berikut:
 
 DATA PEMBELAJARAN:
@@ -322,84 +344,95 @@ INSTRUKSI PENYUSUNAN ATP:
 
 Kembalikan output JSON sesuai schema:`;
 
-    const response = await generateContentWithRetry({
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            rationale: {
-              type: Type.STRING,
-              description: 'Penjelasan rasional mengapa alur TP disusun dalam urutan ini.',
-            },
-            items: {
-              type: Type.ARRAY,
+      const response = await generateContentWithRetry({
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              rationale: {
+                type: Type.STRING,
+                description: 'Penjelasan rasional mengapa alur TP disusun dalam urutan ini.',
+              },
               items: {
-                type: Type.OBJECT,
-                properties: {
-                  stepNumber: { type: Type.INTEGER, description: 'Urutan alur pembelajaran (1, 2, 3...)' },
-                  tpCode: { type: Type.STRING, description: 'Kode TP yang diurutkan' },
-                  tpStatement: { type: Type.STRING, description: 'Rumusan TP' },
-                  materialScope: { type: Type.STRING, description: 'Lingkup Materi / Topik Pembelajaran Spesifik' },
-                  jp: { type: Type.INTEGER, description: 'Jumlah Alokasi Jam Pelajaran (JP), misal 4, 6, 8' },
-                  p3Dimensions: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  assessmentPlan: { type: Type.STRING, description: 'Bentuk Asesmen Awal, Formatif, dan Sumatif' },
-                  glossary: { type: Type.STRING, description: 'Kata kunci / Glosarium istilah penting' },
-                  resources: { type: Type.STRING, description: 'Sumber belajar / Media yang disarankan' },
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    stepNumber: { type: Type.INTEGER, description: 'Urutan alur pembelajaran (1, 2, 3...)' },
+                    tpCode: { type: Type.STRING, description: 'Kode TP yang diurutkan' },
+                    tpStatement: { type: Type.STRING, description: 'Rumusan TP' },
+                    materialScope: { type: Type.STRING, description: 'Lingkup Materi / Topik Pembelajaran Spesifik' },
+                    jp: { type: Type.INTEGER, description: 'Jumlah Alokasi Jam Pelajaran (JP), misal 4, 6, 8' },
+                    p3Dimensions: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    assessmentPlan: { type: Type.STRING, description: 'Bentuk Asesmen Awal, Formatif, dan Sumatif' },
+                    glossary: { type: Type.STRING, description: 'Kata kunci / Glosarium istilah penting' },
+                    resources: { type: Type.STRING, description: 'Sumber belajar / Media yang disarankan' },
+                  },
+                  required: [
+                    'stepNumber',
+                    'tpCode',
+                    'tpStatement',
+                    'materialScope',
+                    'jp',
+                    'p3Dimensions',
+                    'assessmentPlan',
+                    'glossary',
+                  ],
                 },
-                required: [
-                  'stepNumber',
-                  'tpCode',
-                  'tpStatement',
-                  'materialScope',
-                  'jp',
-                  'p3Dimensions',
-                  'assessmentPlan',
-                  'glossary',
-                ],
               },
             },
+            required: ['rationale', 'items'],
           },
-          required: ['rationale', 'items'],
         },
-      },
-    });
+      });
 
-    const parsed = cleanAndParseJSON(response.text, {});
-    res.json({ success: true, data: parsed });
-  } catch (error: unknown) {
-    console.error('Error generating ATP:', error);
-    const message = error instanceof Error ? error.message : 'Terjadi kesalahan saat menyusun ATP dengan AI';
-    res.status(500).json({ error: message });
+      const parsed = cleanAndParseJSON(response.text, null);
+      if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0) {
+        return res.json({ success: true, data: parsed, engine: 'gemini' });
+      }
+    } catch (error: unknown) {
+      console.warn('Gemini ATP generation failed or unconfigured, using pedagogical fallback engine:', error);
+    }
   }
+
+  // Pedagogical Rule Engine fallback
+  const fallbackMatrix = fallbackGenerateATP({ tps, cpGeneral, subject, grade, phase, semester, academicYear, totalHoursPerWeek });
+  res.json({ success: true, data: fallbackMatrix, engine: 'pedagogical_engine' });
 });
 
 // 4. Endpoint: AI Refine / Polish any custom text
 app.post('/api/ai/refine-text', async (req, res) => {
-  try {
-    const { text, instruction, context } = req.body;
-    if (!text) {
-      return res.status(400).json({ error: 'Teks tidak boleh kosong' });
-    }
+  const { text, instruction, context } = req.body || {};
+  if (!text) {
+    return res.status(400).json({ error: 'Teks tidak boleh kosong' });
+  }
 
-    const prompt = `Anda adalah asisten ahli administrasi guru Indonesia.
+  // If GEMINI_API_KEY is configured, try Gemini AI first
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const prompt = `Anda adalah asisten ahli administrasi guru Indonesia.
 Teks asli: "${text}"
 Konteks: ${context || 'Administrasi Kurikulum Merdeka'}
 Instruksi perbaikan: ${instruction || 'Sempurnakan tata bahasa, ketepatan pedagogis, dan istilah Kurikulum Merdeka agar lebih formal, jelas, dan operasional.'}
 
 Berikan versi teks hasil penyempurnaan dalam bahasa Indonesia yang baku dan elegan. Langsung berikan teks hasil tanpa pembuka/penutup.`;
 
-    const response = await generateContentWithRetry({
-      contents: prompt,
-    });
+      const response = await generateContentWithRetry({
+        contents: prompt,
+      });
 
-    res.json({ success: true, refinedText: response.text?.trim() });
-  } catch (error: unknown) {
-    console.error('Error refining text:', error);
-    const message = error instanceof Error ? error.message : 'Gagal menyempurnakan teks';
-    res.status(500).json({ error: message });
+      if (response.text && response.text.trim().length > 0) {
+        return res.json({ success: true, refinedText: response.text.trim(), engine: 'gemini' });
+      }
+    } catch (error: unknown) {
+      console.warn('Gemini refine text failed or unconfigured, using fallback:', error);
+    }
   }
+
+  const refined = fallbackRefineText(text, instruction, context);
+  res.json({ success: true, refinedText: refined, engine: 'pedagogical_engine' });
 });
 
 // Vite middleware in dev or static files in prod

@@ -1128,20 +1128,61 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
                             </div>
                           )}
 
-                          <div className="text-[10px] text-slate-400 flex items-center gap-2 flex-wrap pt-0.5">
-                            <span>Sumber: <strong className="text-slate-600">{cand.source || 'Data Referensi Kemendikdasmen'}</strong></span>
-                            {cand.sourceUrl && (
-                              <a
-                                href={cand.sourceUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="inline-flex items-center gap-0.5 text-blue-600 hover:text-blue-800 underline"
-                              >
-                                <span>Buka sumber</span>
-                                <ExternalLink className="w-2.5 h-2.5" />
-                              </a>
+                          {/* Kepala Sekolah & Status Verifikasi Box */}
+                          <div className="mt-1.5 p-2 rounded-lg bg-slate-50 border border-slate-200/80 text-[11px] space-y-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-slate-500 font-medium">Kepala Sekolah:</span>
+                              <span className="font-semibold text-slate-900 text-right">
+                                {cand.principalName && cand.principalName.trim() ? cand.principalName : (
+                                  <span className="text-slate-400 italic font-normal">Belum ditemukan</span>
+                                )}
+                              </span>
+                            </div>
+
+                            {cand.principalName && (
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-slate-500 font-medium">NIP:</span>
+                                <span className="font-mono text-slate-700 text-[10px] text-right">
+                                  {cand.principalNip && cand.principalNip.trim() ? cand.principalNip : (
+                                    <span className="text-slate-400 italic font-sans">Belum tersedia</span>
+                                  )}
+                                </span>
+                              </div>
                             )}
+
+                            <div className="flex items-center justify-between gap-2 pt-0.5 border-t border-slate-200/60 text-[10px]">
+                              <div className="flex items-center gap-1.5 text-slate-500 truncate">
+                                <span>Sumber:</span>
+                                <span className="font-medium text-slate-700 truncate">
+                                  {cand.principalSource || cand.source || 'Data Referensi Kemendikdasmen'}
+                                </span>
+                                {cand.sourceUrl && (
+                                  <a
+                                    href={cand.sourceUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="inline-flex items-center text-blue-600 hover:text-blue-800"
+                                    title="Lihat Sumber Resmi"
+                                  >
+                                    <ExternalLink className="w-2.5 h-2.5" />
+                                  </a>
+                                )}
+                              </div>
+
+                              <div className="shrink-0">
+                                {cand.principalName || cand.verificationStatus === 'verified' ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-1.5 py-0.5 rounded">
+                                    <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
+                                    Terverifikasi
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center text-[10px] font-medium text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                    Belum terverifikasi
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                           </div>
                         </div>
 
