@@ -114,6 +114,8 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
   const [isSearchingSchool, setIsSearchingSchool] = useState(false);
   const [searchHasError, setSearchHasError] = useState(false);
   const [searchCompleted, setSearchCompleted] = useState(false);
+  const [isResolvingPrincipal, setIsResolvingPrincipal] = useState(false);
+  const [principalNotice, setPrincipalNotice] = useState<string | null>(null);
 
   // Principal History Form State
   const [isAddingPrincipalHistory, setIsAddingPrincipalHistory] = useState(false);
@@ -123,6 +125,49 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
     startDate: new Date().toISOString().slice(0, 10),
     isActive: true,
   });
+
+  const handleAutoResolvePrincipal = async (targetSchool?: Partial<SchoolData>) => {
+    const s = targetSchool || schoolForm;
+    const name = (s.name || '').trim();
+    const npsn = (s.npsn || '').trim();
+
+    if (!name && !npsn) {
+      setPrincipalNotice('Masukkan nama sekolah atau NPSN terlebih dahulu untuk mencari Kepala Sekolah.');
+      return;
+    }
+
+    setIsResolvingPrincipal(true);
+    setPrincipalNotice(null);
+
+    try {
+      const res = await SchoolSearchService.resolvePrincipal({
+        name,
+        npsn,
+        district: s.district || '',
+        regency: s.regency || '',
+        province: s.province || '',
+      });
+
+      if (res.found && res.principalName) {
+        setSchoolForm((prev) => ({
+          ...prev,
+          principalName: res.principalName || prev.principalName,
+          principalNip: res.principalNip || prev.principalNip,
+          principalSource: res.principalSource || prev.principalSource || 'Data Referensi Kemendikdasmen & Dapodik',
+          principalSourceUrl: res.principalSourceUrl || prev.principalSourceUrl,
+          verificationStatus: res.verificationStatus || 'verified',
+          lastVerifiedAt: res.lastVerifiedAt || new Date().toISOString(),
+        }));
+        setPrincipalNotice(`Kepala Sekolah terverifikasi otomatis: ${res.principalName} ${res.principalNip ? `(NIP: ${res.principalNip})` : ''} - Sumber: ${res.principalSource || 'Kemendikdasmen'}`);
+      } else {
+        setPrincipalNotice(res.message || 'Nama kepala sekolah belum tercantum pada direktori publik terbuka. Anda dapat mengisinya secara manual.');
+      }
+    } catch {
+      setPrincipalNotice('Tidak dapat menghubungi layanan verifikasi kepala sekolah saat ini.');
+    } finally {
+      setIsResolvingPrincipal(false);
+    }
+  };
 
   const handleAddPrincipalHistorySubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -214,7 +259,9 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
     }
   };
 
-  const handleSelectCandidate = (cand: SchoolCandidate) => {
+  const handleSelectCandidate = async (cand: SchoolCandidate) => {
+    const hasPrincipal = Boolean(cand.principalName && cand.principalName.trim().length > 1);
+
     setSchoolForm((prev) => ({
       ...prev,
       name: cand.name || prev.name,
@@ -226,8 +273,25 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
       province: cand.province || prev.province,
       principalName: cand.principalName || prev.principalName || '',
       principalNip: cand.principalNip || prev.principalNip || '',
+      principalSource: cand.principalSource || (hasPrincipal ? cand.source : prev.principalSource),
+      principalSourceUrl: cand.principalSourceUrl || cand.sourceUrl || prev.principalSourceUrl,
+      verificationStatus: cand.verificationStatus || (hasPrincipal ? 'verified' : 'unverified'),
+      lastVerifiedAt: cand.lastVerifiedAt || (hasPrincipal ? new Date().toISOString() : prev.lastVerifiedAt),
     }));
-    setSearchNotice(`Data berhasil dimuat dari: ${cand.source || 'Data Referensi Pendidikan Kemendikdasmen'}. Data kepala sekolah perlu diverifikasi dan dapat diisi/diedit secara manual.`);
+
+    if (hasPrincipal) {
+      setSearchNotice(`Data sekolah dan Kepala Sekolah (${cand.principalName}) berhasil dimuat dari: ${cand.source || 'Data Referensi Kemendikdasmen'}.`);
+    } else {
+      setSearchNotice(`Data identitas sekolah dimuat dari: ${cand.source || 'Data Referensi Kemendikdasmen'}. Mencari verifikasi Kepala Sekolah...`);
+      // Trigger background auto resolution
+      handleAutoResolvePrincipal({
+        name: cand.name,
+        npsn: cand.npsn,
+        district: cand.district,
+        regency: cand.regency,
+        province: cand.province,
+      });
+    }
   };
 
   const handleFocusManualInput = () => {
@@ -243,14 +307,25 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
       alert('Nama sekolah wajib diisi.');
       return;
     }
-    onSaveSchool({
+    const savedSchool: SchoolData = {
       ...schoolForm,
       updatedAt: new Date().toISOString(),
-    });
+    };
+    onSaveSchool(savedSchool);
+
+    // If active profile does not have this school assigned, assign it automatically
+    if (activeProfile?.id && onAssignSchool) {
+      const isAlreadyAssigned = assignedSchools.some((s) => s.id === savedSchool.id);
+      if (!isAlreadyAssigned) {
+        onAssignSchool(activeProfile.id, savedSchool.id);
+      }
+    }
+
     setIsEditingSchool(false);
     setSearchQuery('');
     setSearchResults([]);
     setSearchNotice(null);
+    setPrincipalNotice(null);
   };
 
   return (
@@ -530,10 +605,38 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
 
               <div className="flex items-start gap-2 pt-2 border-t border-slate-100">
                 <ShieldCheck className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-semibold text-slate-800">Kepala Sekolah:</div>
-                  <div className="text-slate-900 font-medium">{activeSchool.principalName || '-'}</div>
-                  <div className="text-slate-500">NIP: {activeSchool.principalNip || '-'}</div>
+                <div className="flex-1 space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-800">Kepala Sekolah:</span>
+                    {activeSchool.verificationStatus === 'verified' ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        Terverifikasi Resmi
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                        Diisi / Diverifikasi Guru
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-slate-900 font-bold text-xs">{activeSchool.principalName || 'Belum diisi'}</div>
+                  <div className="text-slate-500 text-[11px]">NIP: {activeSchool.principalNip || 'Belum diisi'}</div>
+                  {activeSchool.principalSource && (
+                    <div className="text-[10px] text-slate-400 pt-0.5 flex items-center gap-1.5 flex-wrap">
+                      <span>Sumber: <strong className="text-slate-600">{activeSchool.principalSource}</strong></span>
+                      {activeSchool.principalSourceUrl && (
+                        <a
+                          href={activeSchool.principalSourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:text-blue-800 underline inline-flex items-center gap-0.5"
+                        >
+                          <span>Tautan data</span>
+                          <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -1166,7 +1269,40 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
               </div>
 
               <div className="border-t border-slate-100 pt-3 space-y-3">
-                <h6 className="text-xs font-bold text-slate-800 uppercase">Data Kepala Sekolah (Untuk Lembar Pengesahan)</h6>
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                    <h6 className="text-xs font-bold text-slate-800 uppercase">Data Kepala Sekolah (Untuk Lembar Pengesahan)</h6>
+                  </div>
+                  <button
+                    type="button"
+                    id="btn-auto-resolve-principal"
+                    disabled={isResolvingPrincipal || (!schoolForm.name?.trim() && !schoolForm.npsn?.trim())}
+                    onClick={() => handleAutoResolvePrincipal()}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 disabled:opacity-50 px-2.5 py-1 rounded-lg transition cursor-pointer"
+                    title="Cari dan verifikasi nama kepala sekolah serta NIP dari direktori resmi"
+                  >
+                    {isResolvingPrincipal ? (
+                      <>
+                        <div className="w-3 h-3 border-2 border-blue-600/40 border-t-blue-600 rounded-full animate-spin" />
+                        <span>Memverifikasi...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Search className="w-3 h-3 text-blue-600" />
+                        <span>Cari / Verifikasi Otomatis</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {principalNotice && (
+                  <div className="p-2.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900 flex items-start gap-2">
+                    <Info className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
+                    <span className="flex-1">{principalNotice}</span>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-slate-700 mb-1">
@@ -1195,6 +1331,30 @@ export const ProfileManager: React.FC<ProfileManagerProps> = ({
                     />
                   </div>
                 </div>
+
+                {schoolForm.principalSource && (
+                  <div className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-lg border border-slate-200/60 flex items-center justify-between gap-2 flex-wrap">
+                    <span>
+                      Sumber Data: <strong>{schoolForm.principalSource}</strong>
+                      {schoolForm.verificationStatus === 'verified' && (
+                        <span className="ml-2 inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-100/80 px-1.5 py-0.2 rounded">
+                          <Check className="w-2.5 h-2.5" /> Terverifikasi
+                        </span>
+                      )}
+                    </span>
+                    {schoolForm.principalSourceUrl && (
+                      <a
+                        href={schoolForm.principalSourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:text-blue-800 text-[10px] underline inline-flex items-center gap-0.5"
+                      >
+                        <span>Lihat Referensi</span>
+                        <ExternalLink className="w-2.5 h-2.5" />
+                      </a>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-4 border-t border-slate-100">

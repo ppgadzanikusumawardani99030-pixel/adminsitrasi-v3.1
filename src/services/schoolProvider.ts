@@ -28,12 +28,60 @@ export interface SchoolSearchResponse {
   sourceType?: SchoolCandidateSourceType | 'mixed' | 'online_search' | 'official_api';
 }
 
+export interface PrincipalResolutionResponse {
+  success: boolean;
+  found: boolean;
+  principalName?: string;
+  principalNip?: string;
+  principalSource?: string;
+  principalSourceUrl?: string;
+  verificationStatus?: 'verified' | 'unverified';
+  lastVerifiedAt?: string;
+  message?: string;
+}
+
 /**
  * SchoolSearchService:
  * Client-side service communicating with the backend trusted web search and education data providers.
  * Strictly adheres to the rule of NEVER fabricating NPSN, address, or principal info.
  */
 export class SchoolSearchService {
+  /**
+   * Resolves and verifies headmaster / principal name and NIP from official sources.
+   */
+  static async resolvePrincipal(params: {
+    name: string;
+    npsn?: string;
+    district?: string;
+    regency?: string;
+    province?: string;
+  }): Promise<PrincipalResolutionResponse> {
+    try {
+      const response = await fetch('/api/schools/resolve-principal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+
+      if (response.ok) {
+        return await response.json();
+      }
+      const err = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        found: false,
+        message: err.message || 'Gagal memverifikasi kepala sekolah.',
+      };
+    } catch (e) {
+      console.warn('[SchoolSearchService] resolvePrincipal error:', e);
+      return {
+        success: false,
+        found: false,
+        message: 'Koneksi ke verifikasi kepala sekolah terputus.',
+      };
+    }
+  }
+
   /**
    * Normalizes a school search candidate result into a clean, typed SchoolData object.
    * Preserves principal information if available from verified sources, or marks empty safely without fabrication.

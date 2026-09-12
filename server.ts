@@ -135,6 +135,31 @@ app.get('/api/schools/search', async (req, res) => {
   }
 });
 
+// Automatic Principal Resolution & Verification Endpoint
+app.post('/api/schools/resolve-principal', async (req, res) => {
+  try {
+    const { name, npsn, district, regency, province } = req.body || {};
+    const result = await OfficialEducationDataProvider.resolvePrincipal({
+      name: name || '',
+      npsn: npsn || '',
+      district: district || '',
+      regency: regency || '',
+      province: province || '',
+    });
+    res.json({ success: true, ...result });
+  } catch (error: unknown) {
+    console.error('Error resolving principal:', error);
+    const message = error instanceof Error ? error.message : 'Gagal memverifikasi kepala sekolah';
+    res.status(500).json({
+      success: false,
+      found: false,
+      verificationStatus: 'unverified',
+      message: 'Gagal menghubungi layanan verifikasi kepala sekolah saat ini.',
+      error: message,
+    });
+  }
+});
+
 // 1. Endpoint: AI Understanding & Breakdown of CP
 app.post('/api/ai/analyze-cp', async (req, res) => {
   try {
