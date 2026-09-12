@@ -11,7 +11,7 @@ export interface TeacherProfile {
   status: 'PNS' | 'PPPK' | 'Guru Tetap Yayasan (GTY)' | 'Guru Tidak Tetap (GTT) / Honorer' | 'Lainnya';
   defaultSubject: string;
   defaultLevel: 'SD' | 'SMP' | 'SMA' | 'SMK';
-  schoolId?: string; // Legacy fallback field; source of truth is TeacherSchoolAssignment
+  schoolId?: string; // ID of the primary school (1 Profil Guru = 1 Sekolah Utama)
   createdAt: string;
   updatedAt: string;
 }

@@ -551,75 +551,38 @@ export function setActiveWorkspaceId(workspaceId: string): void {
 export function getProfileWorkspace(profileId: string, workspaceId?: string): ProfileWorkspaceData {
   const state = loadAppStorage();
   const profile = state.profiles.find((p) => p.id === profileId) || state.profiles[0] || INITIAL_PROFILES[0];
-  
-  // Resolve assignments for this profile
-  let assignments = (state.teacherSchoolAssignments || []).filter((a) => a.teacherId === profile.id);
-  if (assignments.length === 0) {
-    const defaultSchoolId = (profile.schoolId && state.schools.some((s) => s.id === profile.schoolId))
-      ? profile.schoolId
-      : state.schools[0]?.id || 'sch-default-1';
 
-    const newAss: TeacherSchoolAssignment = {
-      id: `assign-${profile.id}-${defaultSchoolId}`,
-      teacherId: profile.id,
-      schoolId: defaultSchoolId,
-      status: 'active',
-      role: 'Guru Kelas / Mapel',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    if (!state.teacherSchoolAssignments) state.teacherSchoolAssignments = [];
-    state.teacherSchoolAssignments.push(newAss);
-    assignments = [newAss];
+  // 1 Profil Guru = 1 Sekolah Utama (master data SchoolData)
+  let school = (profile.schoolId ? state.schools.find((s) => s.id === profile.schoolId) : undefined)
+    || state.schools[0]
+    || INITIAL_SCHOOL;
+
+  // Ensure profile references this valid school
+  if (profile.schoolId !== school.id) {
+    profile.schoolId = school.id;
     saveAppStorage(state);
   }
 
-  const assignedSchoolIds = new Set(assignments.map((a) => a.schoolId));
-  const assignedSchools = state.schools.filter((s) => assignedSchoolIds.has(s.id));
+  // Workspaces strictly for this teacher profile
+  let profileWorkspaces = state.workspaces.filter((w) => w.profileId === profile.id);
 
-  // Determine active school context
-  let activeSchoolId = state.activeSchoolId;
+  // Synchronize schoolId across all workspaces for this profile
+  profileWorkspaces.forEach((w) => {
+    if (w.schoolId !== school.id) {
+      w.schoolId = school.id;
+    }
+  });
 
-  // If a specific workspaceId is requested, inspect its school
+  // Resolve active workspace
   let targetWs: AdministrationWorkspace | undefined;
   if (workspaceId) {
-    const candidateWs = state.workspaces.find((w) => w.id === workspaceId && w.profileId === profile.id);
-    if (candidateWs) {
-      targetWs = candidateWs;
-      if (candidateWs.schoolId && assignedSchoolIds.has(candidateWs.schoolId)) {
-        activeSchoolId = candidateWs.schoolId;
-      }
-    }
+    targetWs = profileWorkspaces.find((w) => w.id === workspaceId);
+  }
+  if (!targetWs) {
+    targetWs = profileWorkspaces.find((w) => w.id === state.activeWorkspaceId) || profileWorkspaces[0];
   }
 
-  if (!activeSchoolId || !assignedSchoolIds.has(activeSchoolId)) {
-    activeSchoolId = assignments[0]?.schoolId || state.schools[0]?.id || 'sch-default-1';
-  }
-
-  // Update state.activeSchoolId if changed
-  if (state.activeSchoolId !== activeSchoolId) {
-    state.activeSchoolId = activeSchoolId;
-  }
-
-  let school = state.schools.find((s) => s.id === activeSchoolId) || assignedSchools[0] || state.schools[0] || INITIAL_SCHOOL;
-
-  // Legacy fallback sync
-  if (profile.schoolId !== school.id) {
-    profile.schoolId = school.id;
-  }
-
-  // Workspaces strictly for this teacher profile AND this active school
-  let profileSchoolWorkspaces = state.workspaces.filter(
-    (w) => w.profileId === profile.id && w.schoolId === school.id
-  );
-
-  // If targetWs is not yet resolved or belongs to a different school, pick a workspace for this school
-  if (!targetWs || targetWs.schoolId !== school.id) {
-    targetWs = profileSchoolWorkspaces.find((w) => w.id === state.activeWorkspaceId) ||
-               profileSchoolWorkspaces[0];
-  }
-
-  // If no workspace exists for this profile & active school, bootstrap one automatically
+  // If no workspace exists for this profile, bootstrap one automatically
   if (!targetWs) {
     const newSettingId = `acad-${profile.id}-${Date.now()}`;
     const derivedPhase = getPhaseFromGrade(profile.defaultLevel || 'SD', 'Kelas 1');
@@ -651,7 +614,7 @@ export function getProfileWorkspace(profileId: string, workspaceId?: string): Pr
     state.workspaces.push(newWs);
     state.activeWorkspaceId = newWs.id;
     targetWs = newWs;
-    profileSchoolWorkspaces = [newWs];
+    profileWorkspaces = [newWs];
     saveAppStorage(state);
   }
 
@@ -800,7 +763,7 @@ export function getProfileWorkspace(profileId: string, workspaceId?: string): Pr
     school,
     schools: state.schools || [{ ...INITIAL_SCHOOL }],
     teacherSchoolAssignments: state.teacherSchoolAssignments || [],
-    assignedSchools,
+    assignedSchools: [school],
     principalHistories,
     workspace: targetWs,
     academicSetting,
@@ -810,8 +773,8 @@ export function getProfileWorkspace(profileId: string, workspaceId?: string): Pr
     tp,
     atp,
     documents: workspaceDocs.length > 0 ? workspaceDocs : (state.documents || []),
-    allWorkspaces: profileSchoolWorkspaces,
-    allWorkspacesForProfile: profileSchoolWorkspaces,
+    allWorkspaces: profileWorkspaces,
+    allWorkspacesForProfile: profileWorkspaces,
     activeProfile: profile,
     activeSchool: school,
     activeWorkspace: targetWs,
@@ -1089,8 +1052,15 @@ export function saveProfile(profile: TeacherProfile): void {
     current.activeProfileId = profile.id;
   }
 
-  // If a schoolId is associated with this profile, ensure an assignment exists without mutating other workspaces
+  // Ensure all workspaces belonging to this teacher profile are synced with profile.schoolId
   if (profile.schoolId) {
+    current.workspaces.forEach((w) => {
+      if (w.profileId === profile.id) {
+        w.schoolId = profile.schoolId!;
+      }
+    });
+
+    // Compatibility assignment
     if (!current.teacherSchoolAssignments) current.teacherSchoolAssignments = [];
     const hasAssignment = current.teacherSchoolAssignments.some(
       (a) => a.teacherId === profile.id && a.schoolId === profile.schoolId
@@ -1125,99 +1095,135 @@ export function deleteProfile(profileId: string): void {
   saveAppStorage(current);
 }
 
-export function saveSchool(school: SchoolData, mode: 'create' | 'edit' = 'edit'): SchoolData {
+export function getSchools(): SchoolData[] {
   const current = loadAppStorage();
-  
-  let targetSchool: SchoolData;
+  return current.schools || [];
+}
 
-  if (mode === 'create') {
-    // Brand new school record
-    targetSchool = {
-      ...school,
-      id: school.id && !current.schools.some((s) => s.id === school.id)
-        ? school.id
-        : `sch-${Date.now()}`,
-      updatedAt: new Date().toISOString(),
-      createdAt: school.createdAt || new Date().toISOString(),
-    };
-    current.schools.push(targetSchool);
-  } else {
-    // Edit existing school by matching ID
-    const existingIdx = current.schools.findIndex((s) => s.id === school.id);
-    if (existingIdx >= 0) {
-      const existingSchool = current.schools[existingIdx];
-      targetSchool = {
-        ...existingSchool,
-        ...school,
-        id: existingSchool.id,
-        updatedAt: new Date().toISOString(),
-      };
-      current.schools[existingIdx] = targetSchool;
-    } else {
-      // Fallback if not found by ID, create it
-      targetSchool = {
-        ...school,
-        id: school.id || `sch-${Date.now()}`,
-        updatedAt: new Date().toISOString(),
-      };
-      current.schools.push(targetSchool);
-    }
+export function findSchool(schoolId: string): SchoolData | undefined {
+  const current = loadAppStorage();
+  return (current.schools || []).find((s) => s.id === schoolId);
+}
+
+export function findSchoolByNpsn(npsn: string): SchoolData | undefined {
+  if (!npsn || !npsn.trim()) return undefined;
+  const current = loadAppStorage();
+  const cleanNpsn = npsn.trim();
+  return (current.schools || []).find((s) => s.npsn && s.npsn.trim() === cleanNpsn);
+}
+
+export function createSchool(school: Omit<SchoolData, 'id'> | SchoolData): SchoolData {
+  const current = loadAppStorage();
+  const newId = ('id' in school && school.id && !current.schools.some((s) => s.id === school.id))
+    ? school.id
+    : `sch-${Date.now()}`;
+
+  const newSchool: SchoolData = {
+    ...school,
+    id: newId,
+    createdAt: ('createdAt' in school && school.createdAt) ? school.createdAt : new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  current.schools.push(newSchool);
+
+  // If principal name is specified on creation, initialize active principal history record
+  if (newSchool.principalName && newSchool.principalName.trim()) {
+    if (!current.principalHistories) current.principalHistories = [];
+    current.principalHistories.push({
+      id: `ph-${Date.now()}`,
+      schoolId: newSchool.id,
+      name: newSchool.principalName.trim(),
+      nip: newSchool.principalNip?.trim() || '',
+      startDate: new Date().toISOString().slice(0, 10),
+      isActive: true,
+      source: newSchool.principalSource || 'Data Sekolah Baru',
+      createdAt: new Date().toISOString(),
+    });
   }
 
-  // Principal History Archiving and Synchronization:
-  // When active principal changes, previous principal is archived (isActive = false, endDate set)
-  // and new principal is added/updated as active.
-  if (targetSchool.principalName && targetSchool.principalName.trim()) {
+  saveAppStorage(current);
+  return newSchool;
+}
+
+export function updateSchool(schoolId: string, updates: Partial<SchoolData>): SchoolData {
+  const current = loadAppStorage();
+  const existingIdx = current.schools.findIndex((s) => s.id === schoolId);
+  if (existingIdx < 0) {
+    // If not found by ID, fallback to creating with this ID
+    return createSchool({ ...updates, id: schoolId } as SchoolData);
+  }
+
+  const existing = current.schools[existingIdx];
+  const updatedSchool: SchoolData = {
+    ...existing,
+    ...updates,
+    id: existing.id,
+    updatedAt: new Date().toISOString(),
+  };
+  current.schools[existingIdx] = updatedSchool;
+
+  // Handle principal changes and archiving:
+  // Only archive and add new active history if name or NIP has changed
+  if (updates.principalName !== undefined && updates.principalName.trim() !== '') {
     if (!current.principalHistories) current.principalHistories = [];
-    const activeHist = current.principalHistories.find((h) => h.schoolId === targetSchool.id && h.isActive);
+    const activeHist = current.principalHistories.find((h) => h.schoolId === updatedSchool.id && h.isActive);
     if (activeHist) {
-      const isNameDiff = activeHist.name.trim() !== targetSchool.principalName.trim();
-      const isNipDiff = (activeHist.nip || '').trim() !== (targetSchool.principalNip || '').trim();
+      const isNameDiff = activeHist.name.trim() !== updatedSchool.principalName.trim();
+      const isNipDiff = (activeHist.nip || '').trim() !== (updatedSchool.principalNip || '').trim();
       if (isNameDiff || isNipDiff) {
-        // 1. Archive previous principal
         activeHist.isActive = false;
         if (!activeHist.endDate) {
           activeHist.endDate = new Date().toISOString().slice(0, 10);
         }
-        // 2. Add new active history record
         current.principalHistories.push({
           id: `ph-${Date.now()}`,
-          schoolId: targetSchool.id,
-          name: targetSchool.principalName.trim(),
-          nip: targetSchool.principalNip?.trim() || '',
+          schoolId: updatedSchool.id,
+          name: updatedSchool.principalName.trim(),
+          nip: updatedSchool.principalNip?.trim() || '',
           startDate: new Date().toISOString().slice(0, 10),
           isActive: true,
-          source: targetSchool.principalSource || 'Diisi Manual / Pembaruan Data',
+          source: updatedSchool.principalSource || 'Pembaruan Data Sekolah',
           createdAt: new Date().toISOString(),
         });
       }
     } else {
       current.principalHistories.push({
         id: `ph-${Date.now()}`,
-        schoolId: targetSchool.id,
-        name: targetSchool.principalName.trim(),
-        nip: targetSchool.principalNip?.trim() || '',
+        schoolId: updatedSchool.id,
+        name: updatedSchool.principalName.trim(),
+        nip: updatedSchool.principalNip?.trim() || '',
         startDate: new Date().toISOString().slice(0, 10),
         isActive: true,
-        source: targetSchool.principalSource || 'Diisi Manual / Hasil Verifikasi',
+        source: updatedSchool.principalSource || 'Pembaruan Data Sekolah',
         createdAt: new Date().toISOString(),
       });
     }
   }
 
   saveAppStorage(current);
-  return targetSchool;
+  return updatedSchool;
+}
+
+export function saveSchool(school: SchoolData, mode: 'create' | 'edit' = 'edit'): SchoolData {
+  if (mode === 'create') {
+    return createSchool(school);
+  }
+  return updateSchool(school.id, school);
 }
 
 export function deleteSchool(schoolId: string): boolean {
   const current = loadAppStorage();
   if (current.schools.length <= 1) return false;
-  // Check if any active assignment exists for this school
-  const isAssigned = (current.teacherSchoolAssignments || []).some((a) => a.schoolId === schoolId);
-  if (isAssigned) return false;
+  // Check if any profile is referencing this school as primary school
+  const isUsedByProfile = current.profiles.some((p) => p.schoolId === schoolId);
+  if (isUsedByProfile) return false;
 
   current.schools = current.schools.filter((s) => s.id !== schoolId);
   current.principalHistories = (current.principalHistories || []).filter((h) => h.schoolId !== schoolId);
+  if (current.teacherSchoolAssignments) {
+    current.teacherSchoolAssignments = current.teacherSchoolAssignments.filter((a) => a.schoolId !== schoolId);
+  }
   saveAppStorage(current);
   return true;
 }
@@ -1254,6 +1260,13 @@ export function assignSchoolToTeacher(teacherId: string, schoolId: string, role?
     activeProf.updatedAt = new Date().toISOString();
   }
 
+  // Synchronize workspaces for this profile
+  current.workspaces.forEach((w) => {
+    if (w.profileId === teacherId) {
+      w.schoolId = schoolId;
+    }
+  });
+
   current.activeSchoolId = schoolId;
   saveAppStorage(current);
   return assignment;
@@ -1264,32 +1277,26 @@ export function unassignSchoolFromTeacher(teacherId: string, schoolId: string): 
   if (!current.teacherSchoolAssignments) return false;
 
   const teacherAssignments = current.teacherSchoolAssignments.filter((a) => a.teacherId === teacherId);
-  // Do not unassign if it's the teacher's only school assignment
   if (teacherAssignments.length <= 1) {
     return false;
   }
 
-  // Remove assignment relationship only; NEVER touch master SchoolData
   current.teacherSchoolAssignments = current.teacherSchoolAssignments.filter(
     (a) => !(a.teacherId === teacherId && a.schoolId === schoolId)
   );
 
-  if (current.activeSchoolId === schoolId) {
-    const remaining = current.teacherSchoolAssignments.filter((a) => a.teacherId === teacherId);
-    current.activeSchoolId = remaining[0]?.schoolId || current.schools[0]?.id;
-    const activeProf = current.profiles.find((p) => p.id === teacherId);
-    if (activeProf) {
-      activeProf.schoolId = current.activeSchoolId;
-    }
-    const nextWs = current.workspaces.find(
-      (w) => w.profileId === teacherId && w.schoolId === current.activeSchoolId
-    );
-    if (nextWs) {
-      current.activeWorkspaceId = nextWs.id;
-    } else {
-      delete current.activeWorkspaceId;
-    }
+  const remaining = current.teacherSchoolAssignments.filter((a) => a.teacherId === teacherId);
+  const nextSchoolId = remaining[0]?.schoolId || current.schools[0]?.id;
+  current.activeSchoolId = nextSchoolId;
+  const activeProf = current.profiles.find((p) => p.id === teacherId);
+  if (activeProf) {
+    activeProf.schoolId = nextSchoolId;
   }
+  current.workspaces.forEach((w) => {
+    if (w.profileId === teacherId) {
+      w.schoolId = nextSchoolId;
+    }
+  });
 
   saveAppStorage(current);
   return true;
@@ -1299,42 +1306,20 @@ export function setActiveSchool(schoolId: string): void {
   const current = loadAppStorage();
   current.activeSchoolId = schoolId;
 
-  // Ensure active profile's schoolId is in sync
+  // Ensure active profile's primary schoolId is in sync
   if (current.activeProfileId) {
     const activeProf = current.profiles.find((p) => p.id === current.activeProfileId);
     if (activeProf) {
       activeProf.schoolId = schoolId;
       activeProf.updatedAt = new Date().toISOString();
     }
-  }
 
-  // Ensure compatibility assignment
-  if (current.activeProfileId) {
-    if (!current.teacherSchoolAssignments) current.teacherSchoolAssignments = [];
-    const hasAss = current.teacherSchoolAssignments.some(
-      (a) => a.teacherId === current.activeProfileId && a.schoolId === schoolId
-    );
-    if (!hasAss) {
-      current.teacherSchoolAssignments.push({
-        id: `assign-${current.activeProfileId}-${schoolId}-${Date.now()}`,
-        teacherId: current.activeProfileId,
-        schoolId,
-        status: 'active',
-        role: 'Guru Kelas / Mapel',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-    }
-  }
-
-  // Point active workspace to an existing workspace of the active profile for this school
-  const matchingWs = current.workspaces.find(
-    (w) => w.profileId === current.activeProfileId && w.schoolId === schoolId
-  );
-  if (matchingWs) {
-    current.activeWorkspaceId = matchingWs.id;
-  } else {
-    delete current.activeWorkspaceId;
+    // Ensure all workspaces of this profile match the active primary school
+    current.workspaces.forEach((w) => {
+      if (w.profileId === current.activeProfileId) {
+        w.schoolId = schoolId;
+      }
+    });
   }
 
   saveAppStorage(current);
@@ -1360,7 +1345,7 @@ export function savePrincipalHistory(history: PrincipalHistory): void {
     list.push(history);
   }
 
-  // If active, sync active principal info back to SchoolData
+  // Only if set to active, sync active principal info back to SchoolData
   if (history.isActive) {
     const targetSchool = current.schools.find((s) => s.id === history.schoolId);
     if (targetSchool) {
