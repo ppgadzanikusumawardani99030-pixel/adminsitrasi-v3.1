@@ -125,11 +125,10 @@ export function App() {
   };
 
   // Handlers for School
-  const handleSaveSchool = (school: SchoolData) => {
-    const saved = saveSchool(school);
-    // Automatically assign newly created school to active teacher if not already assigned
-    if (activeProfile?.id && saved?.id) {
-      assignSchoolToTeacher(activeProfile.id, saved.id);
+  const handleSaveSchool = (school: SchoolData, mode: 'create' | 'edit' = 'edit') => {
+    const saved = saveSchool(school, mode);
+    if (mode === 'create' || !activeProfile.schoolId) {
+      setActiveSchool(saved.id);
     }
     refreshData();
   };

@@ -1125,32 +1125,43 @@ export function deleteProfile(profileId: string): void {
   saveAppStorage(current);
 }
 
-export function saveSchool(school: SchoolData): SchoolData {
+export function saveSchool(school: SchoolData, mode: 'create' | 'edit' = 'edit'): SchoolData {
   const current = loadAppStorage();
   
-  // Deduplication: Match by ID or non-empty NPSN
-  const existingIdx = current.schools.findIndex(
-    (s) => s.id === school.id || (school.npsn && school.npsn.trim() !== '' && s.npsn?.trim() === school.npsn.trim())
-  );
-
   let targetSchool: SchoolData;
-  if (existingIdx >= 0) {
-    const existingSchool = current.schools[existingIdx];
-    const existingId = existingSchool.id;
-    targetSchool = {
-      ...existingSchool,
-      ...school,
-      id: existingId,
-      updatedAt: new Date().toISOString(),
-    };
-    current.schools[existingIdx] = targetSchool;
-  } else {
+
+  if (mode === 'create') {
+    // Brand new school record
     targetSchool = {
       ...school,
-      id: school.id || `sch-${Date.now()}`,
+      id: school.id && !current.schools.some((s) => s.id === school.id)
+        ? school.id
+        : `sch-${Date.now()}`,
       updatedAt: new Date().toISOString(),
+      createdAt: school.createdAt || new Date().toISOString(),
     };
     current.schools.push(targetSchool);
+  } else {
+    // Edit existing school by matching ID
+    const existingIdx = current.schools.findIndex((s) => s.id === school.id);
+    if (existingIdx >= 0) {
+      const existingSchool = current.schools[existingIdx];
+      targetSchool = {
+        ...existingSchool,
+        ...school,
+        id: existingSchool.id,
+        updatedAt: new Date().toISOString(),
+      };
+      current.schools[existingIdx] = targetSchool;
+    } else {
+      // Fallback if not found by ID, create it
+      targetSchool = {
+        ...school,
+        id: school.id || `sch-${Date.now()}`,
+        updatedAt: new Date().toISOString(),
+      };
+      current.schools.push(targetSchool);
+    }
   }
 
   // Principal History Archiving and Synchronization:
@@ -1236,6 +1247,13 @@ export function assignSchoolToTeacher(teacherId: string, schoolId: string, role?
     current.teacherSchoolAssignments.push(assignment);
   }
 
+  // Synchronize active profile's primary school
+  const activeProf = current.profiles.find((p) => p.id === teacherId);
+  if (activeProf) {
+    activeProf.schoolId = schoolId;
+    activeProf.updatedAt = new Date().toISOString();
+  }
+
   current.activeSchoolId = schoolId;
   saveAppStorage(current);
   return assignment;
@@ -1259,6 +1277,10 @@ export function unassignSchoolFromTeacher(teacherId: string, schoolId: string): 
   if (current.activeSchoolId === schoolId) {
     const remaining = current.teacherSchoolAssignments.filter((a) => a.teacherId === teacherId);
     current.activeSchoolId = remaining[0]?.schoolId || current.schools[0]?.id;
+    const activeProf = current.profiles.find((p) => p.id === teacherId);
+    if (activeProf) {
+      activeProf.schoolId = current.activeSchoolId;
+    }
     const nextWs = current.workspaces.find(
       (w) => w.profileId === teacherId && w.schoolId === current.activeSchoolId
     );
@@ -1276,6 +1298,34 @@ export function unassignSchoolFromTeacher(teacherId: string, schoolId: string): 
 export function setActiveSchool(schoolId: string): void {
   const current = loadAppStorage();
   current.activeSchoolId = schoolId;
+
+  // Ensure active profile's schoolId is in sync
+  if (current.activeProfileId) {
+    const activeProf = current.profiles.find((p) => p.id === current.activeProfileId);
+    if (activeProf) {
+      activeProf.schoolId = schoolId;
+      activeProf.updatedAt = new Date().toISOString();
+    }
+  }
+
+  // Ensure compatibility assignment
+  if (current.activeProfileId) {
+    if (!current.teacherSchoolAssignments) current.teacherSchoolAssignments = [];
+    const hasAss = current.teacherSchoolAssignments.some(
+      (a) => a.teacherId === current.activeProfileId && a.schoolId === schoolId
+    );
+    if (!hasAss) {
+      current.teacherSchoolAssignments.push({
+        id: `assign-${current.activeProfileId}-${schoolId}-${Date.now()}`,
+        teacherId: current.activeProfileId,
+        schoolId,
+        status: 'active',
+        role: 'Guru Kelas / Mapel',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  }
 
   // Point active workspace to an existing workspace of the active profile for this school
   const matchingWs = current.workspaces.find(

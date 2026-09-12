@@ -110,7 +110,7 @@ export const Header: React.FC<HeaderProps> = ({
                   value={school.id}
                   onChange={(e) => onSelectSchool?.(e.target.value)}
                   className="bg-transparent text-xs font-bold text-emerald-900 focus:outline-hidden py-1 px-1.5 cursor-pointer max-w-[120px] sm:max-w-[170px] truncate"
-                  title="Pilih Sekolah yang Sedang Diampu / Aktif"
+                  title="Sekolah Utama Aktif"
                 >
                   {assignedSchools.map((s) => (
                     <option key={s.id} value={s.id}>
